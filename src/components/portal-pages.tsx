@@ -412,7 +412,7 @@ function BatchList({ records, state, role, section }: { records: ApiRecord[]; st
   if (!records.length) return <EmptyCollection title="batches" />;
   return <div className="live-record-list">{records.map((record, index) => {
     const slug = displayValue(record.slug, "");
-    const identifier = displayValue(record.public_id, slug);
+    const identifier = slug;
     const course = isRecord(record.course) ? record.course : null;
     const teacher = isRecord(record.primary_teacher) ? record.primary_teacher : null;
     const detailPath = role === "teacher" ? routeFor(role, "batches", `manage/${identifier}`) : routeFor(role, "discover", `batch/${slug}`);
