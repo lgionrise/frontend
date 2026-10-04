@@ -18,26 +18,34 @@ import {
 
 type Props = { role: PortalRole; section: string[]; pageKey: string; hasSession: boolean; user: ApiRecord | null };
 
-declare global {
-  interface Window {
-    Razorpay?: new (options: {
-      key: string;
-      amount: number;
-      currency: string;
-      name: string;
-      description?: string;
-      order_id: string;
-      prefill?: { name?: string; email?: string; contact?: string };
-      notes?: Record<string, string>;
-      theme?: { color?: string };
-      modal?: { ondismiss?: () => void };
-      handler: (response: {
-        razorpay_order_id: string;
-        razorpay_payment_id: string;
-        razorpay_signature: string;
-      }) => void | Promise<void>;
-    }) => { open: () => void; close?: () => void };
-  }
+type RazorpayResponse = {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+};
+
+type RazorpayOptions = {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description?: string;
+  order_id: string;
+  prefill?: { name?: string; email?: string; contact?: string };
+  notes?: Record<string, string>;
+  theme?: { color?: string };
+  modal?: { ondismiss?: () => void };
+  handler: (response: RazorpayResponse) => void | Promise<void>;
+};
+
+type RazorpayConstructor = new (options: RazorpayOptions) => {
+  open: () => void;
+  close?: () => void;
+};
+
+function getRazorpay(): RazorpayConstructor | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { Razorpay?: RazorpayConstructor }).Razorpay;
 }
 
 
@@ -548,7 +556,7 @@ function BatchDetails({ record, hasSession, onError }: { record: ApiRecord; hasS
   const batchPrice = record.effective_price ?? record.price;
 
   useEffect(() => {
-    const check = () => setCheckoutReady(typeof window !== "undefined" && typeof window.Razorpay === "function");
+    const check = () => setCheckoutReady(typeof window !== "undefined" && typeof getRazorpay() === "function");
     check();
     const timer = window.setInterval(check, 300);
     return () => window.clearInterval(timer);
@@ -563,7 +571,7 @@ function BatchDetails({ record, hasSession, onError }: { record: ApiRecord; hasS
       onError("This batch does not have a valid public ID.");
       return;
     }
-    if (typeof window === "undefined" || typeof window.Razorpay !== "function") {
+    if (typeof window === "undefined" || typeof getRazorpay() !== "function") {
       onError("Razorpay Checkout is still loading. Please wait a moment and try again.");
       return;
     }
@@ -596,7 +604,14 @@ function BatchDetails({ record, hasSession, onError }: { record: ApiRecord; hasS
         throw new Error("The payment order response is incomplete. Please try again.");
       }
 
-      const razorpay = new window.Razorpay({
+      const Razorpay = getRazorpay();
+    if (!Razorpay) {
+      onError("Razorpay Checkout is not available. Please refresh and try again.");
+      setBusy(false);
+      return;
+    }
+
+    const razorpay = new Razorpay({
         key,
         amount: amountPaise,
         currency,
