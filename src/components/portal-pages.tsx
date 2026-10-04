@@ -1,5 +1,6 @@
 "use client";
 
+import Script from "next/script";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
@@ -512,28 +513,214 @@ function TestAttempt({ record, onClose, onError }: { record: ApiRecord; onClose:
     })}</div>}</div>;
   })}</div><button className="button button-primary" type="button" disabled={submitting} onClick={() => void submit()}>{submitting ? "Submitting…" : "Submit test"} <ArrowRight size={14} /></button></section></div>;
 }
-
-function BatchDetails({ record, hasSession, onError }: { record: ApiRecord; hasSession: boolean; onError: (message: string) => void }) {
+function BatchDetails({
+  record,
+  hasSession,
+  onError,
+}: {
+  record: ApiRecord;
+  hasSession: boolean;
+  onError: (message: string) => void;
+}) {
   const [busy, setBusy] = useState(false);
-  const [order, setOrder] = useState<ApiRecord | null>(null);
-  const schedules = Array.isArray(record.schedules) ? record.schedules.filter(isRecord) : [];
+  const [paymentStatus, setPaymentStatus] = useState("");
+
+  const schedules = Array.isArray(record.schedules)
+    ? record.schedules.filter(isRecord)
+    : [];
+
   async function createOrder() {
     if (!hasSession) {
       onError("Sign in before enrolling in a batch.");
       return;
     }
+
     setBusy(true);
+    setPaymentStatus("");
     onError("");
+
     try {
-      const result = await apiRequest<ApiRecord>("/payments/orders/create/", { method: "POST", body: JSON.stringify({ purchase_type: "batch_enrollment", batch_id: record.public_id }) });
-      setOrder(result);
-    } catch (reason) {
-      onError(reason instanceof Error ? reason.message : "The checkout order could not be created.");
-    } finally {
+      // 1. Create server-side Razorpay order
+      const order = await apiRequest<ApiRecord>(
+        "/payments/orders/create/",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            purchase_type: "batch_enrollment",
+            batch_id: record.public_id,
+          }),
+        }
+      );
+
+      const razorpayOrderId = String(order.order_id ?? "");
+      const razorpayKey = String(order.key ?? "");
+      const amountPaise =
+        order.amount_paise !== undefined
+          ? Number(order.amount_paise)
+          : Math.round(Number(order.amount) * 100);
+
+      if (!razorpayOrderId || !razorpayKey || !amountPaise) {
+        throw new Error("Invalid payment order received from server.");
+      }
+
+      if (!(window as any).Razorpay) {
+        throw new Error(
+          "Razorpay Checkout is not loaded. Please refresh the page and try again."
+        );
+      }
+
+      // 2. Open Razorpay Checkout
+      const razorpay = new (window as any).Razorpay({
+        key: razorpayKey,
+        amount: amountPaise,
+        currency: String(order.currency ?? "INR"),
+        name: "LGIONRISE",
+        description: `Batch enrollment - ${recordTitle(record)}`,
+        order_id: razorpayOrderId,
+
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            setBusy(true);
+            setPaymentStatus("Verifying payment...");
+
+            // 3. Server-side signature verification
+            const verification = await apiRequest<ApiRecord>(
+              "/payments/orders/verify/",
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                }),
+              }
+            );
+
+            if (verification.success === false) {
+              throw new Error(
+                String(
+                  isRecord(verification.error)
+                    ? verification.error.message
+                    : "Payment verification failed."
+                )
+              );
+            }
+
+            setPaymentStatus(
+              "Payment successful. Your batch enrollment is being activated."
+            );
+
+            // Refresh current page/data
+            window.location.reload();
+          } catch (error) {
+            setPaymentStatus("");
+            onError(
+              error instanceof Error
+                ? error.message
+                : "Payment verification failed."
+            );
+          } finally {
+            setBusy(false);
+          }
+        },
+
+        modal: {
+          ondismiss: () => {
+            setBusy(false);
+            setPaymentStatus("");
+          },
+        },
+
+        theme: {
+          color: "#527c5e",
+        },
+      });
+
+      razorpay.open();
+    } catch (error) {
+      onError(
+        error instanceof Error
+          ? error.message
+          : "Unable to start payment."
+      );
       setBusy(false);
     }
   }
-  return <section className="batch-detail-panel"><div className="batch-detail-main"><span className="eyebrow">BATCH DETAILS FROM API</span><h2>{recordTitle(record)}</h2><p>{displayValue(record.description, "No description provided.")}</p><dl className="batch-facts">{["language", "effective_price", "validity_start", "validity_end", "seats_available", "average_rating"].filter(key => record[key] !== undefined).map(key => <div key={key}><dt>{titleCase(key.replaceAll("_", "-"))}</dt><dd>{displayValue(record[key])}</dd></div>)}</dl><button type="button" className="button button-primary" disabled={busy} onClick={() => void createOrder()}>{busy ? "Creating checkout…" : "Create enrollment checkout"} <CreditCard size={14} /></button></div><div className="batch-schedule"><h3><CalendarDays size={16} /> Schedule</h3>{schedules.length ? schedules.map((slot,index)=><p key={String(slot.public_id ?? index)}>{displayValue(slot.day_of_week)} · {displayValue(slot.start_time)}–{displayValue(slot.end_time)} · {displayValue(slot.subject)}</p>) : <p>No schedule slots returned.</p>}</div>{order && <RecordDialog record={order} title="Payment order created" onClose={() => setOrder(null)} />}</section>;
+
+  return (
+    <section className="batch-detail-panel">
+      <Script
+        src="https://checkout.razorpay.com/v1/checkout.js"
+        strategy="afterInteractive"
+      />
+
+      <div className="batch-detail-main">
+        <span className="eyebrow">BATCH DETAILS FROM API</span>
+
+        <h2>{recordTitle(record)}</h2>
+
+        <p>
+          {displayValue(
+            record.description,
+            "No description provided."
+          )}
+        </p>
+
+        <dl className="batch-facts">
+          {[
+            "language",
+            "effective_price",
+            "validity_start",
+            "validity_end",
+            "seats_available",
+            "average_rating",
+          ]
+            .filter((key) => record[key] !== undefined)
+            .map((key) => (
+              <div key={key}>
+                <dt>{titleCase(key.replaceAll("_", "-"))}</dt>
+                <dd>{displayValue(record[key])}</dd>
+              </div>
+            ))}
+        </dl>
+
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={busy}
+          onClick={() => void createOrder()}
+        >
+          {busy
+            ? paymentStatus || "Opening checkout..."
+            : "Enroll & Pay"}
+          <CreditCard size={14} />
+        </button>
+      </div>
+
+      <div className="batch-schedule">
+        <h3>
+          <CalendarDays size={16} /> Schedule
+        </h3>
+
+        {schedules.length ? (
+          schedules.map((slot, index) => (
+            <p key={String(slot.public_id ?? index)}>
+              {displayValue(slot.day_of_week)} ·{" "}
+              {displayValue(slot.start_time)}–
+              {displayValue(slot.end_time)} ·{" "}
+              {displayValue(slot.subject)}
+            </p>
+          ))
+        ) : (
+          <p>No schedule slots returned.</p>
+        )}
+      </div>
+    </section>
+  );
 }
 
 function TestResult({ record, state }: { record: ApiRecord | null; state: LoadState }) {
